@@ -1,0 +1,1 @@
+usar migrate para as migrations da base de dados
