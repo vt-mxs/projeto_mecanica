@@ -1,4 +1,10 @@
 services:
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:6173"
+
   backend:
     build:
       context: ./backend
