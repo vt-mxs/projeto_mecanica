@@ -14,6 +14,17 @@ docker compose up --build
 
 # Portas
 
-backend -> backend:8080
-front -> localhost:5173
-postgres -> postgres:
+backend
+```
+backend:8080
+```
+front
+
+```
+localhost:5173
+```
+
+postgres
+```
+postgres:5432
+```
