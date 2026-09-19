@@ -1,7 +1,15 @@
 package main
 
-import "fmt"
+import (
+	"github.com/gofiber/fiber/v3"
+)
 
 func main() {
-	fmt.Print("hello mechanic")
+	app := fiber.New()
+
+	app.Get("/", func(c fiber.Ctx) error {
+		return c.SendString("Welcome do Mechanics.")
+	})
+
+	app.Listen(":8080")
 }
