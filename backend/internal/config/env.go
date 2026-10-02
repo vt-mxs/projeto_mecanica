@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 
@@ -35,5 +36,45 @@ func LoadENV() (*Config, error) {
 		cfg.BACKEND_PORT = "8080"
 	}
 
+	// BUG PRÉ-EXISTENTE: o compose.yaml injeta DB_HOST/DB_PORT/DB_NAME/
+	// DB_USER/DB_PASSWORD, mas aqui só se lia DATABASE_URL. Dentro do
+	// container o .env do host não existe (.dockerignore exclui .env),
+	// então DATABASE_URL ficava vazia e o GORM caía no default
+	// "user=root database=" a tentar ligar a um socket unix em /tmp.
+	//
+	// Composto a partir das variáveis que o compose de facto passa,
+	// com o host "postgres" (o hostname interno da rede do compose) e
+	// sslmode=disable, que é o modo do pg_hba.conf do container.
+	if cfg.DATABASE_URL == "" {
+		host := envOr("DB_HOST", "postgres")
+		port := envOr("DB_PORT", "5432")
+		name := os.Getenv("DB_NAME")
+		user := os.Getenv("DB_USER")
+		pass := os.Getenv("DB_PASSWORD")
+
+		if name != "" && user != "" {
+			cfg.DATABASE_URL = fmt.Sprintf(
+				"postgres://%s:%s@%s:%s/%s?sslmode=disable",
+				user, pass, host, port, name,
+			)
+		}
+	}
+
+	// Sem URL nenhuma não há o que ligar. Falhar aqui é melhor do que
+	// deixar o GORM tentar um socket unix e devolver um erro que não
+	// diz nada sobre a causa.
+	if cfg.DATABASE_URL == "" {
+		return nil, fmt.Errorf(
+			"sem DATABASE_URL: define-a, ou define DB_NAME/DB_USER (e DB_PASSWORD) para o compose montar a URL",
+		)
+	}
+
 	return &cfg, nil
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

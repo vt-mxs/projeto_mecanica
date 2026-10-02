@@ -24,8 +24,12 @@ set -a; source .env; set +a
 
 #### 2- utilizar essas vars para rodar as migrations
 
+> `$POSTGRES_HOST` e `$POSTGRES_PORT` **não existem** no `.env` — só lá
+> estão `POSTGRES_DB`, `POSTGRES_USER` e `POSTGRES_PASSWORD`. É por isso
+> que este comando não corre, para além de todos os outros problemas.
+
 ````bash
-migrate -path ./db/migrations -database "postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@$POSTGRES_HOST:$POSTGRES_PORT/$POSTGRES_DB?sslmode=disable" up
+migrate -path ./db/migrations -database "postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:5432/$POSTGRES_DB?sslmode=disable" up
 ````
 
 > ⚠️ Este comando **não funciona** tal como está. Ver
@@ -33,7 +37,36 @@ migrate -path ./db/migrations -database "postgres://$POSTGRES_USER:$POSTGRES_PAS
 
 ---
 
-## Porque é que o serviço `migrate` existe no `compose.yaml`
+## Credenciais: nunca escritas à mão neste ficheiro
+
+Este documento é rastreado pelo git. Qualquer password escrita aqui está
+**no histórico do repositório**, e apagar a linha depois não a remove de
+lá. Por isso:
+
+- **Nunca escrever `POSTGRES_PASSWORD` nem a URL completa neste
+  ficheiro.** O `.env` está no `.gitignore` e por isso é que pode ter a
+  password; um `.md` no git não pode.
+- **`psql`, `pg_dump` e `pg_restore` vão sempre dentro de
+  `sh -c '...'`**, a ler `$POSTGRES_USER` e `$POSTGRES_DB` do `env` do
+  próprio container:
+
+  ```bash
+  # NÃO: utilizador e base de dados em claro, e parte se mudares o nome
+  docker compose exec postgres psql -U <utilizador> -d <base_de_dados>
+
+  # SIM: o sh expande no container, onde o compose já pôs as variáveis
+  docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+  ```
+
+- **Os comandos do `migrate` precisam de `set -a; source .env; set +a`**
+  antes, porque o serviço `migrate` não recebe `POSTGRES_*` no seu
+  `environment` — a URL tem mesmo de ser montada no host.
+
+Se a password alguma vez for para um repo remoto, trocar a password
+**não resolve**: o histórico continua. Ou se purga o histórico, ou se
+aceita que já esteve exposta.
+
+---
 
 ### O problema
 
@@ -91,7 +124,7 @@ IP interno do container, que cai na regra `scram-sha-256` do `pg_hba.conf`:
 ```bash
 docker compose exec postgres sh -c \
   'PGPASSWORD=$POSTGRES_PASSWORD psql -h $(hostname -i) -U $POSTGRES_USER -d $POSTGRES_DB -c "select current_user"'
-# vtgbrc
+# <o valor de POSTGRES_USER>        ← output do comando, não está a passar a password
 ```
 
 **4. Não há forma de saber que versão do schema está aplicada**
@@ -243,13 +276,20 @@ mkdir -p backups
 ### Backup completo (dados + schema)
 
 ```bash
-docker compose exec -T postgres pg_dump -U vtgbrc -d mecanica_db -Fc > backups/db_$(date +%Y%m%d_%H%M%S).dump
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > backups/db_$(date +%Y%m%d_%H%M%S).dump
 ```
 
 O `-T` é obrigatório: sem ele o `docker exec` aloca uma TTY e o ficheiro fica
 contaminado com sequências de controlo. O `-Fc` é o formato comprimido do
 Postgres, e o `>` redirecciona para o teu disco porque o `exec` corre no teu
 shell, não dentro do container.
+
+O `sh -c '...'` não é decoração. O `psql` e o `pg_dump` vivem **dentro** do
+container, e o `sh -c` deixa-os ler `$POSTGRES_USER` e `$POSTGRES_DB` do
+próprio `env` do container, que o `compose.yaml` já lá coloca. Escrever
+`-U <utilizador> -d <base_de_dados>` à mão funciona, mas põe o utilizador e a base de
+dados em claro num ficheiro que vai para o git, e deixa de funcionar no dia
+que mudares o nome.
 
 Confirma que o ficheiro não está vazio antes de confiares nele:
 
@@ -261,7 +301,7 @@ pg_restore -l backups/db_20260928_140000.dump | head
 ### Só o schema
 
 ```bash
-docker compose exec -T postgres pg_dump -U vtgbrc -d mecanica_db --schema-only > backups/schema_$(date +%Y%m%d).sql
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --schema-only' > backups/schema_$(date +%Y%m%d).sql
 ```
 
 O schema já vive no git, nos ficheiros de migration. Este dump é uma rede de
@@ -271,7 +311,7 @@ dado momento, independentemente do que o `schema_migrations` diz.
 ### Restauro
 
 ```bash
-docker compose exec -T postgres pg_restore -U vtgbrc -d mecanica_db --clean --if-exists < backups/db_20260928_140000.dump
+docker compose exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists' < backups/db_20260928_140000.dump
 ```
 
 O `--clean --if-exists` diz ao `pg_restore` para largar os objectos que já lá
@@ -351,16 +391,19 @@ por isso tens de repetir o `-path` e o `-database`:
 
 ```bash
 # 1. SEMPRE backup antes (é o que torna o down reversível)
-docker compose exec -T postgres pg_dump -U vtgbrc -d mecanica_db -Fc > backups/antes_do_down.dump
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > backups/antes_do_down.dump
 
 # 2. reverter a ÚLTIMA migration
+#    o serviço migrate NÃO tem POSTGRES_* no seu env, por isso aqui
+#    a URL tem de ser montada a partir do .env do teu host
+set -a; source .env; set +a
 docker compose run --rm migrate \
   -path=/migrations \
-  -database="postgres://vtgbrc:804512@postgres:5432/mecanica_db?sslmode=disable" \
+  -database="postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?sslmode=disable" \
   down 1
 
 # 3. se correu mal, voltar ao ponto 1
-docker compose exec -T postgres pg_restore -U vtgbrc -d mecanica_db --clean --if-exists < backups/antes_do_down.dump
+docker compose exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists' < backups/antes_do_down.dump
 ```
 
 Este ciclo foi testado e confirmado: backup → `down 1` → restauro devolve as 10
@@ -401,7 +444,7 @@ O `migrate` pode deixar a base de dados marcada como `dirty` e recusa-se a
 correr seja o que for:
 
 ```bash
-docker compose exec postgres psql -U vtgbrc -d mecanica_db -c "select * from schema_migrations"
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select * from schema_migrations"'
 #  version | dirty
 #         2 | t        ← nenhuma migration pode correr
 ```
@@ -410,12 +453,12 @@ Duas saídas:
 
 ```bash
 # 1) se tens backup: restaura e fica resolvido
-docker compose exec -T postgres pg_restore -U vtgbrc -d mecanica_db --clean --if-exists < backups/antes.dump
+docker compose exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists' < backups/antes.dump
 
 # 2) se a migration a meio é aceitável, marca como aplicada
 docker compose run --rm migrate \
   -path=/migrations \
-  -database="postgres://vtgbrc:804512@postgres:5432/mecanica_db?sslmode=disable" \
+  -database="postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?sslmode=disable" \
   force 1
 ```
 
@@ -427,6 +470,14 @@ a ti confirmar à mão que o estado real do schema bate certo com isso — o
 
 ## Comandos úteis
 
+Todos os comandos `psql`/`pg_dump`/`pg_restore` vão dentro de
+`sh -c '...'` para lerem `$POSTGRES_USER` e `$POSTGRES_DB` do `env` do
+container. Sem segredos escritos à mão, e não se parte quando mudares
+o nome do utilizador.
+
+Os comandos do `migrate` precisam de `set -a; source .env; set +a` antes,
+porque o serviço `migrate` não recebe `POSTGRES_*` no seu `environment`.
+
 ```bash
 # aplicar as migrations (ou reaplicar, é idempotente)
 docker compose up -d
@@ -436,20 +487,27 @@ docker compose run --rm migrate
 docker compose logs migrate
 
 # entrar no psql DENTRO do container (não precisa de porta publicada)
-docker compose exec postgres psql -U vtgbrc -d mecanica_db
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 
 # ver as tabelas
-docker compose exec postgres psql -U vtgbrc -d mecanica_db -c "\dt"
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "\dt"'
 
 # ver que versão do schema está aplicada
-docker compose exec postgres psql -U vtgbrc -d mecanica_db -c "select * from schema_migrations"
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "select * from schema_migrations"'
 
 # backup e restauro
 mkdir -p backups
-docker compose exec -T postgres pg_dump -U vtgbrc -d mecanica_db -Fc > backups/db_$(date +%Y%m%d_%H%M%S).dump
-docker compose exec -T postgres pg_restore -U vtgbrc -d mecanica_db --clean --if-exists < backups/db_20260928_140000.dump
+docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > backups/db_$(date +%Y%m%d_%H%M%S).dump
+docker compose exec -T postgres sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists' < backups/db_20260928_140000.dump
 
-# recomeçar de zero (APAGA OS DADOS — só em dev)
+# reverter a última migration (precisa das vars do .env no host)
+set -a; source .env; set +a
+docker compose run --rm migrate \
+  -path=/migrations \
+  -database="postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@postgres:5432/$POSTGRES_DB?sslmode=disable" \
+  down 1
+
+# recomençar de zero (APAGA OS DADOS — só em dev)
 docker compose down -v && docker compose up -d
 ```
 
