@@ -1,6 +1,9 @@
 -- ============================================================
 -- 000001_init_schema.down.sql
 -- Remoção de todas as tabelas e tipos enumerados
+--
+-- A ordem de eliminação tem de respeitar as dependências: as
+-- tabelas que referenciam `usuarios` têm de cair antes dela.
 -- ============================================================
 
 DROP TABLE IF EXISTS pagamentos;

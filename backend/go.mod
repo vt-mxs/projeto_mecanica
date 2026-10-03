@@ -67,5 +67,3 @@ require (
 	gorm.io/driver/postgres v1.6.2 // indirect
 	gorm.io/gorm v1.31.2 // indirect
 )
-
-tool github.com/golang-migrate/migrate/v4
